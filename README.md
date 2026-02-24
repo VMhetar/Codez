@@ -1,0 +1,1 @@
+Codez is an AI agent which helps the enterprises by allowing the codebase to connect to GitHub and Slack for automatingthe worflow and keeping the human in the loop during the verification in Git branch.
