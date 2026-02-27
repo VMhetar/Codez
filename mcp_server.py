@@ -9,7 +9,7 @@ load_dotenv()
 app = FastAPI()
 
 g = Github(os.getenv("GITHUB_TOKEN"))
-repo = g.get_repo(os.getenv("Codez"))
+repo = g.get_repo(os.getenv("REPO_NAME"))
 
 class PRRequest(BaseModel):
     branch_name: str
