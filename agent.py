@@ -14,10 +14,6 @@ client = OpenAI(
     base_url="https://openrouter.ai/api/v1"
 )
 
-
-# ===============================
-# MODIFY CODE (Structured JSON)
-# ===============================
 def modify_code(code, instruction):
     response = client.chat.completions.create(
         model="anthropic/claude-3-haiku",
@@ -57,7 +53,6 @@ Code:
 
     content = response.choices[0].message.content.strip()
 
-    # Clean markdown if model still adds it
     if "```" in content:
         content = content.split("```")[1]
 
@@ -69,10 +64,6 @@ Code:
         print(content)
         raise
 
-
-# ===============================
-# GENERATE PR SUMMARY
-# ===============================
 def generate_pr_summary(instruction, original, modified):
     response = client.chat.completions.create(
         model="anthropic/claude-3-haiku",
@@ -105,10 +96,6 @@ Generate:
 
     return response.choices[0].message.content
 
-
-# ===============================
-# MAIN
-# ===============================
 def main():
     instruction = input("Enter instruction: ")
     file_path = "app.py"
@@ -121,16 +108,13 @@ def main():
     print("\n---- ORIGINAL ----\n", original_code)
     print("\n---- MODIFIED ----\n", modified_code)
 
-    # Clean branch name
     short = re.sub(r'[^a-zA-Z0-9 ]', '', instruction)
     short = short.split('.')[0][:30]
     short = short.replace(" ", "-").lower()
     branch_name = f"ai/{short}-{datetime.datetime.now().strftime('%H%M%S')}"
 
-    # Generate PR summary
     pr_summary = generate_pr_summary(instruction, original_code, modified_code)
 
-    # Generate diff
     diff = "\n".join(
         difflib.unified_diff(
             original_code.splitlines(),
@@ -139,7 +123,6 @@ def main():
         )
     )
 
-    # Create PR
     pr_response = requests.post(
         "http://localhost:8000/create_pr",
         json={
@@ -152,18 +135,15 @@ def main():
 
     pr_url = pr_response.json()["pr_url"]
 
-    # Send Slack notification with diff preview
     requests.post(
         "http://localhost:8000/notify_slack",
         json={
             "text": f"""
-🚀 AI Agent Update
 
 Task: {instruction}
 Branch: {branch_name}
 PR: {pr_url}
 
-📌 Diff Preview:
 
 Awaiting review.
 """
