@@ -1,157 +1,138 @@
-import os
-import re
 import json
-import requests
-import datetime
-import difflib
-from dotenv import load_dotenv
-from openai import OpenAI
-
-load_dotenv()
-
-client = OpenAI(
-    api_key=os.getenv("OPENROUTER_API_KEY"),
-    base_url="https://openrouter.ai/api/v1"
-)
-
-def modify_code(code, instruction):
-    response = client.chat.completions.create(
-        model="anthropic/claude-3-haiku",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a senior engineer.\n"
-                    "Respond ONLY with valid JSON.\n"
-                    "Ensure all strings are properly escaped.\n"
-                    "Do not include markdown.\n"
-                )
-            },
-            {
-                "role": "user",
-                "content": f"""
-Return JSON in this exact format:
-
-{{
-  "code": "<FULL MODIFIED PYTHON FILE AS STRING>"
-}}
-
-Important:
-- Escape all newlines as \\n
-- Escape all quotes properly
-- Return ONLY JSON
-
-Instruction:
-{instruction}
-
-Code:
-{code}
-"""
+import httpx
+import asyncio
+import os
+from mcp.server.fastmcp import FastMCP
+from mcp_server import read_repository_file, create_pull_request, notify_slack
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_repository_file",
+            "description": "Read a file from the repository",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"}
+                },
+                "required": ["file_path"]
             }
-        ]
-    )
-
-    content = response.choices[0].message.content.strip()
-
-    if "```" in content:
-        content = content.split("```")[1]
-
-    try:
-        parsed = json.loads(content)
-        return parsed["code"]
-    except Exception:
-        print("⚠ JSON parsing failed. Raw output:\n")
-        print(content)
-        raise
-
-def generate_pr_summary(instruction, original, modified):
-    response = client.chat.completions.create(
-        model="anthropic/claude-3-haiku",
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a senior code reviewer. Provide structured markdown."
-            },
-            {
-                "role": "user",
-                "content": f"""
-Instruction:
-{instruction}
-
-Original Code:
-{original}
-
-Modified Code:
-{modified}
-
-Generate:
-- Summary
-- Key Changes
-- Risk Level (Low/Medium/High)
-- Testing Recommendations
-"""
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_pull_request",
+            "description": "Create a pull request in a new branch",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "branch_name": {"type": "string"},
+                    "file_path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "message": {"type": "string"}
+                },
+                "required": ["branch_name", "file_path", "content", "message"]
             }
-        ]
-    )
-
-    return response.choices[0].message.content
-
-def main():
-    instruction = input("Enter instruction: ")
-    file_path = "app.py"
-
-    with open(file_path, "r") as f:
-        original_code = f.read()
-
-    modified_code = modify_code(original_code, instruction)
-
-    print("\n---- ORIGINAL ----\n", original_code)
-    print("\n---- MODIFIED ----\n", modified_code)
-
-    short = re.sub(r'[^a-zA-Z0-9 ]', '', instruction)
-    short = short.split('.')[0][:30]
-    short = short.replace(" ", "-").lower()
-    branch_name = f"ai/{short}-{datetime.datetime.now().strftime('%H%M%S')}"
-
-    pr_summary = generate_pr_summary(instruction, original_code, modified_code)
-
-    diff = "\n".join(
-        difflib.unified_diff(
-            original_code.splitlines(),
-            modified_code.splitlines(),
-            lineterm=""
-        )
-    )
-
-    pr_response = requests.post(
-        "http://localhost:8000/create_pr",
-        json={
-            "branch_name": branch_name,
-            "file_path": file_path,
-            "content": modified_code,
-            "commit_message": instruction
         }
-    )
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "notify_slack",
+            "description": "Send a message to Slack",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string"}
+                },
+                "required": ["message"]
+            }
+        }
+    }
+]
 
-    pr_url = pr_response.json()["pr_url"]
 
-    requests.post(
-        "http://localhost:8000/notify_slack",
-        json={
-            "text": f"""
+async def run_llm(change_request: str):
 
-Task: {instruction}
-Branch: {branch_name}
-PR: {pr_url}
+    system_prompt = """
+You are an autonomous AI engineering agent.
 
+You MUST use tools for any action involving:
+- Reading repository files
+- Creating pull requests
+- Sending Slack notifications
 
-Awaiting review.
+You are NOT allowed to output final code directly.
+
+Workflow:
+1. Read repository file.
+2. Modify code.
+3. Create a pull request using the tool.
+4. Notify Slack.
+
+Always call tools. Never just respond with code.
 """
-        }
-    )
 
-    print("PR Created:", pr_url)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": change_request}
+    ]
 
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f'Bearer {os.getenv("OPENROUTER_API_KEY")}',
+    }
 
+    async with httpx.AsyncClient() as client:
+
+        while True:
+
+            response = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json={
+                    "model": "anthropic/claude-3-haiku",
+                    "messages": messages,
+                    "tools": TOOLS,
+                    "tool_choice":"auto"
+                },
+            )
+
+            response.raise_for_status()
+            result = response.json()
+
+            message = result["choices"][0]["message"]
+
+            # If no tool call → done
+            if "tool_calls" not in message:
+                return message["content"]
+
+            tool_call = message["tool_calls"][0]
+            tool_name = tool_call["function"]["name"]
+            tool_args = json.loads(tool_call["function"]["arguments"])
+
+            # Execute MCP tool locally
+            if tool_name == "read_repository_file":
+                tool_result = read_repository_file(**tool_args)
+
+            elif tool_name == "create_pull_request":
+                tool_result = create_pull_request(**tool_args)
+
+            elif tool_name == "notify_slack":
+                tool_result = notify_slack(**tool_args)
+
+            else:
+                tool_result = "Unknown tool"
+
+            # Append tool result back to conversation
+            messages.append(message)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call["id"],
+                "content": tool_result
+            })
 if __name__ == "__main__":
-    main()
+    user_input = input("Enter change request: ")
+    result = asyncio.run(run_llm(user_input))
+    print("\nFinal Response:\n", result)
